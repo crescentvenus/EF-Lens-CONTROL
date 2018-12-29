@@ -40,7 +40,7 @@ boolean  real_mode = false;
 
 int mode = 0;
 int mode_counter[2];
-int focuserPosition,  apValue, offset, apAddr, x, y;
+int focuserPosition,  apValue, offset, apAddr, fpAddr, fpValue, x, y;
 boolean  IsFirstConnect;
 
 void InitLens()
@@ -99,9 +99,9 @@ void setup() {
   pinMode(LED_Red, OUTPUT);
   pinMode(LED_Green, OUTPUT);
   pinMode(LED_SW, INPUT_PULLUP);
-  pinMode(CS,OUTPUT);
-  pinMode(F1,INPUT_PULLUP);
-  
+  pinMode(CS, OUTPUT);
+  pinMode(F1, INPUT_PULLUP);
+
   attachInterrupt(0, ENC_READ, CHANGE);
   attachInterrupt(1, ENC_READ, CHANGE);
 
@@ -116,21 +116,38 @@ void setup() {
   display.println("EF-LensFocuser");
   display.display();
   delay(1000);
-  mode = 0;
-  apAddr = 0;
+  mode = 0;   // focus control mode
+  apAddr = 0; // 1 byte memory for apurture value
+  fpAddr = 1; // 2 byte memory for focus position
   focuserPosition = 5000;
   SPI.begin();
   SPI.setBitOrder(MSBFIRST);
   SPI.setClockDivider(SPI_CLOCK_DIV128);
   SPI.setDataMode(SPI_MODE3);
   digitalWrite(12, HIGH);
-  InitLens();
   digitalWrite(LED_Red, HIGH);
   digitalWrite(LED_Green, LOW);
-
+  InitLens();
+  SPI.transfer(0x05); // Focus Max
+  delay(1000);
   apValue = EEPROM.read(apAddr);
+  fpValue =  EEPROM.read(fpAddr) * 256 + EEPROM.read(fpAddr + 1); // focus position
+  offset = fpValue - focuserPosition;
+  proc_lens(offset);    // Move focus tot last position
+
   Serial.begin(9600);
+  Serial.print("FP:");
+  Serial.println(fpValue);
+  Serial.print("AP:");
   Serial.println(apValue);
+  display.clearDisplay();
+  display.setCursor(0, 10);
+  display.print("F:");
+  display.println(fpValue);
+  display.print("A:");
+  display.println(apValue);
+  display.display();
+  delay(1000);
   // nothing to do inside the setup
 }
 
@@ -138,7 +155,7 @@ void loop() {
   int sw_count;
   int tmp, last_offset;
   short counter_now;
-  digitalWrite(CS,HIGH);
+  digitalWrite(CS, HIGH);
   sw_count = 0;
   while (digitalRead(LED_SW) == LOW) {
     sw_count++;
@@ -168,16 +185,18 @@ void loop() {
     digitalWrite(LED_Red, HIGH);
     digitalWrite(LED_Green, LOW);
   }
-  if (sw_count != 0) {
-    Serial.print("mode:");
+  /*
+    if (sw_count != 0) {
+    Serial.print("mode: ");
     Serial.print(mode);
-    Serial.print(", real:");
+    Serial.print(", real: ");
     Serial.println(real_mode);
-  }
+    }
+  */
   if (sw_count > 200) {
     real_mode = !real_mode;
     if (real_mode) {
-      Serial.print("mode:");
+      Serial.print("mode: ");
       Serial.println(mode);
       last_offset = mode_counter[mode];
     } else {
@@ -205,29 +224,40 @@ void loop() {
 }
 
 void proc_lens(int tmp) {
-  digitalWrite(CS,LOW);
+  int ap;
+  digitalWrite(CS, LOW);
   if  (mode == 0 ) { // Send command to LENS　フォーカス
     if (real_mode) {
       offset = tmp;
     } else {
       offset = mode_counter[mode] ;
     }
+    x = highByte(focuserPosition);
+    y = lowByte(focuserPosition);
+    EEPROM.write(fpAddr, x);      // write to EEPROM last focus position
+    EEPROM.write(fpAddr + 1, y);
     x = highByte(offset);
     y = lowByte(offset);
+    Serial.print("FP:");
+    Serial.print(offset);
+    Serial.print(", ");
+    Serial.println(focuserPosition);
     InitLens();
-    Serial.print(offset); Serial.print(",");
-    Serial.print(x); Serial.print(",");
-    Serial.println(y);
     SPI.transfer(0x44);       delay(30);
     SPI.transfer(x);        delay(30);
     SPI.transfer(y);        delay(30);
     SPI.transfer(0);        delay(100);
     focuserPosition += offset;
   } else {              // 絞り
+    apValue = mode_counter[mode] ;
+    ap = (apValue - EEPROM.read(apAddr)) * 3;
+    Serial.print("APvalue:");
+    Serial.print(apValue);
+    Serial.print(",SET ap:");
+    Serial.println(ap);
     if (apValue != EEPROM.read(apAddr))
     {
       InitLens();
-      Serial.println("AP");
       SPI.transfer(0x07);          delay(10);
       SPI.transfer(0x13);          delay(10);
       SPI.transfer((apValue - EEPROM.read(apAddr)) * 3);
@@ -247,7 +277,7 @@ void disp_update(int tmp, int last_offset) {
     sep = '>';
     switch (mode) {
       case 0:
-        (tmp>0)?sep='>':sep='<';
+        (tmp > 0) ? sep = '>' : sep = '<';
         display.print("F");
         display.print(sep);
         display.println(  last_offset );
