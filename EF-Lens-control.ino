@@ -6,11 +6,9 @@
    EFレンズの制御関連参考リンク
    ASCOM EF Lens Controller
    http://www.indilib.org/media/kunena/attachments/3728/ascom_efEN.pdf
-
    EFレンズから信号線の引き出の参照資料
    How to Move Canon EF Lenses Yosuke Bando
    http://web.media.mit.edu/~bandy/invariant/move_lens.pdf
-
    Canon　EFレンズのArduino制御
    http://otobs.org/hiki/?EOS_model
    Technical aspects of the Canon EF lens mount
@@ -18,7 +16,6 @@
 */
 #include <SPI.h>
 #include <EEPROM.h>
-#include <math.h>
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -29,6 +26,8 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 #define LED_SW   7
+#define CS 10   // Emurate CS of SPI for DEBUG
+#define F1 9    // Function SW
 #define ENC_A  2
 #define ENC_B  3
 #define LED_Red 14
@@ -37,12 +36,12 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 volatile byte pos;
 volatile int  enc_count;
 boolean    sw = false;
+boolean  real_mode = false;
+
 int mode = 0;
 int mode_counter[2];
-int focuserPosition, targetPos, apValue, offset, apAddr, x, y;
-String targetStr, apStr, gStr;
-boolean IsMoving, IsFirstConnect;
-char inStr[6];
+int focuserPosition,  apValue, offset, apAddr, x, y;
+boolean  IsFirstConnect;
 
 void InitLens()
 {
@@ -100,15 +99,18 @@ void setup() {
   pinMode(LED_Red, OUTPUT);
   pinMode(LED_Green, OUTPUT);
   pinMode(LED_SW, INPUT_PULLUP);
+  pinMode(CS,OUTPUT);
+  pinMode(F1,INPUT_PULLUP);
+  
   attachInterrupt(0, ENC_READ, CHANGE);
   attachInterrupt(1, ENC_READ, CHANGE);
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.clearDisplay();
 
-  // テキストサイズを設定
+  // Font size
   display.setTextSize(3);
-  // テキスト色を設定
+  // Font color
   display.setTextColor(WHITE);
   display.setCursor(0, 10);
   display.println("EF-LensFocuser");
@@ -126,7 +128,7 @@ void setup() {
   digitalWrite(LED_Red, HIGH);
   digitalWrite(LED_Green, LOW);
 
-  apValue=EEPROM.read(apAddr);
+  apValue = EEPROM.read(apAddr);
   Serial.begin(9600);
   Serial.println(apValue);
   // nothing to do inside the setup
@@ -134,91 +136,154 @@ void setup() {
 
 void loop() {
   int sw_count;
+  int tmp, last_offset;
   short counter_now;
+  digitalWrite(CS,HIGH);
   sw_count = 0;
   while (digitalRead(LED_SW) == LOW) {
     sw_count++;
     if (sw_count > 50) {
-      if (mode == 1) {    // 新モードはフォーカス制御
+      if (mode == 1) {    // forcus control mode
         digitalWrite(LED_Red, HIGH);
         digitalWrite(LED_Green, LOW);
-      } else {            // 新モードは絞り制御
+      } else {            // aperture control mode
         digitalWrite(LED_Green, HIGH);
         digitalWrite(LED_Red, LOW);
       }
     }
+    if (sw_count > 200) {
+      digitalWrite(LED_Green, HIGH);
+      digitalWrite(LED_Red, HIGH);
+    }
     delay(10);
   }
   delay(100);
-  if (sw_count > 50) {
-    if (mode == 0) {
-      mode = 1;   // 絞りモード
-      digitalWrite(LED_Green, HIGH);
-      digitalWrite(LED_Red, LOW);
+  if (sw_count > 50 && sw_count < 200) {
+    mode == 0 ? mode = 1 : mode = 0;
+  }
+  if (mode == 1) {
+    digitalWrite(LED_Green, HIGH);
+    digitalWrite(LED_Red, LOW);
+  } else {
+    digitalWrite(LED_Red, HIGH);
+    digitalWrite(LED_Green, LOW);
+  }
+  if (sw_count != 0) {
+    Serial.print("mode:");
+    Serial.print(mode);
+    Serial.print(", real:");
+    Serial.println(real_mode);
+  }
+  if (sw_count > 200) {
+    real_mode = !real_mode;
+    if (real_mode) {
+      Serial.print("mode:");
+      Serial.println(mode);
+      last_offset = mode_counter[mode];
     } else {
-      mode = 0;   // フォーカスモード
-      digitalWrite(LED_Red, HIGH);
-      digitalWrite(LED_Green, LOW);
+      mode_counter[mode] = last_offset;
     }
   }
   if (sw_count != 0 && (sw_count < 50) ) {
-    if  (mode == 0 ) { // Send command to LENS　フォーカス
-      targetPos =  mode_counter[mode] ;
-      offset = mode_counter[mode] ;
-      x = highByte(offset);
-      y = lowByte(offset);
-      InitLens();
-      IsMoving = true;
-      Serial.print(offset); Serial.print(",");
-      Serial.print(x); Serial.print(",");
-      Serial.println(y);
-      SPI.transfer(68);       delay(30);
-      SPI.transfer(x);        delay(30);
-      SPI.transfer(y);        delay(30);
-      SPI.transfer(0);        delay(100);
-      IsMoving = false;
-      focuserPosition += offset;    // Update focuser position
-    } else {              // 絞り
-      apValue = mode_counter[mode] % 20;
-      if (apValue != EEPROM.read(apAddr))
-      {
-        InitLens();
-        Serial.println("AP");
-        SPI.transfer(0x07);          delay(10);
-        SPI.transfer(0x13);          delay(10);
-        SPI.transfer((apValue - EEPROM.read(apAddr)) * 3);
-        delay(100);
-        SPI.transfer(0x08);          delay(10);
-        SPI.transfer(0x00);          delay(10);
-        EEPROM.write(apAddr, apValue);
-      }
-    }
+    proc_lens(tmp);
   }
 
   counter_now = ENC_COUNT(mode_counter[mode]);
+  tmp = counter_now - mode_counter[mode];   // encoder counter state
   if (mode_counter[mode] != counter_now)
   {
-    mode_counter[mode] = counter_now;
+    tmp > 0 ? 1 : -1;
+    if (real_mode) {
+      mode_counter[mode] += tmp;
+      proc_lens(tmp);
+    } else {
+      mode_counter[mode] = counter_now;
+    }
   }
-  disp_update();
+  if (sw_count != 0 || tmp != 0) disp_update(tmp, last_offset);
+
 }
 
-void disp_update() {
+void proc_lens(int tmp) {
+  digitalWrite(CS,LOW);
+  if  (mode == 0 ) { // Send command to LENS　フォーカス
+    if (real_mode) {
+      offset = tmp;
+    } else {
+      offset = mode_counter[mode] ;
+    }
+    x = highByte(offset);
+    y = lowByte(offset);
+    InitLens();
+    Serial.print(offset); Serial.print(",");
+    Serial.print(x); Serial.print(",");
+    Serial.println(y);
+    SPI.transfer(0x44);       delay(30);
+    SPI.transfer(x);        delay(30);
+    SPI.transfer(y);        delay(30);
+    SPI.transfer(0);        delay(100);
+    focuserPosition += offset;
+  } else {              // 絞り
+    if (apValue != EEPROM.read(apAddr))
+    {
+      InitLens();
+      Serial.println("AP");
+      SPI.transfer(0x07);          delay(10);
+      SPI.transfer(0x13);          delay(10);
+      SPI.transfer((apValue - EEPROM.read(apAddr)) * 3);
+      delay(100);
+      SPI.transfer(0x08);          delay(10);
+      SPI.transfer(0x00);          delay(10);
+      EEPROM.write(apAddr, apValue);
+    }
+  }
+}
+
+void disp_update(int tmp, int last_offset) {
+  char sep;
   display.clearDisplay();
   display.setCursor(0, 10);
+  if (real_mode) {    // Update when encoder rotated
+    sep = '>';
     switch (mode) {
-    case 0:
-      display.print("F:");
-      display.println( mode_counter[mode] );
-      display.print("P:");
-      display.println( focuserPosition);
-      break;
-    case 1:
-      display.print("F:");
-      display.println( focuserPosition );
-      display.print("A:");
-      display.println(mode_counter[mode]);
-      break;
+      case 0:
+        (tmp>0)?sep='>':sep='<';
+        display.print("F");
+        display.print(sep);
+        display.println(  last_offset );
+        display.print("P");
+        display.print(sep);
+        display.println( focuserPosition);
+        break;
+      case 1:
+        display.print("F");
+        display.print(sep);
+        display.println( focuserPosition );
+        display.print("A");
+        display.print(sep);
+        display.println(mode_counter[mode]);
+        break;
+    }
+  } else {        // Update when switch pushed
+    sep = ':';
+    switch (mode) {
+      case 0:
+        display.print("F");
+        display.print(sep);
+        display.println( mode_counter[mode] );
+        display.print("P");
+        display.print(sep);
+        display.println( focuserPosition);
+        break;
+      case 1:
+        display.print("F");
+        display.print(sep);
+        display.println( focuserPosition );
+        display.print("A");
+        display.print(sep);
+        display.println(mode_counter[mode]);
+        break;
+    }
   }
   display.display();
 }
