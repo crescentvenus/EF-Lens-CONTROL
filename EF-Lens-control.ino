@@ -117,7 +117,7 @@ void setup() {
   display.display();
   delay(1000);
   mode = 0;   // focus control mode
-  apAddr = 0; // 1 byte memory for apurture value
+  apAddr = 0; // 1 byte memory for aperture value
   fpAddr = 1; // 2 byte memory for focus position
   focuserPosition = 5000;
   SPI.begin();
@@ -148,7 +148,6 @@ void setup() {
   display.println(apValue);
   display.display();
   delay(1000);
-  // nothing to do inside the setup
 }
 
 void loop() {
