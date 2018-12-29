@@ -177,7 +177,7 @@ void loop() {
       SPI.transfer(y);        delay(30);
       SPI.transfer(0);        delay(100);
       IsMoving = false;
-      focuserPosition = targetPos;
+      focuserPosition += offset;    // Update focuser position
     } else {              // 絞り
       apValue = mode_counter[mode] % 20;
       if (apValue != EEPROM.read(apAddr))
@@ -206,9 +206,19 @@ void loop() {
 void disp_update() {
   display.clearDisplay();
   display.setCursor(0, 10);
-  display.print(" F:");
-  display.println( mode_counter[0] );
-  display.print(" A:");
-  display.println(mode_counter[1]);
+    switch (mode) {
+    case 0:
+      display.print("F:");
+      display.println( mode_counter[mode] );
+      display.print("P:");
+      display.println( focuserPosition);
+      break;
+    case 1:
+      display.print("F:");
+      display.println( focuserPosition );
+      display.print("A:");
+      display.println(mode_counter[mode]);
+      break;
+  }
   display.display();
 }
