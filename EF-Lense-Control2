@@ -40,8 +40,8 @@ boolean    sw = false;
 boolean  rec_mode = false; // move LENS without pushing SW
 
 int mode = 0;   // 0:Focus control, 1:Aperture control
-int mode_counter[2];
-int focuserPosition,  apValue, offset, apAddr, fpAddr, fpValue, stepAddr, stepValue;
+int mode_counter[2] , focuserPosition, offset;
+int apAddr, apValue, fpAddr, fpValue, stepAddr, stepValue;
 
 void InitLens()
 {
@@ -136,7 +136,7 @@ void setup() {
   stepValue =  EEPROM.read(stepAddr);
 
   offset = fpValue - focuserPosition;
-  proc_lens(offset);    // Move focus tot last position
+  proc_lens();    // Move focus tot last position
   focuserPosition = fpValue;
 #ifdef DEBUG
   Serial.begin(9600);
@@ -149,6 +149,17 @@ void setup() {
   Serial.print("AP:");
   Serial.println(apValue);
 #endif
+/*
+ * Initialize starting values when needed.
+ * Press SW at startup.
+ */
+if (digitalRead(LED_SW) == LOW){
+  fpValue=5000;
+  focuserPosition=5000;
+  offset=0;
+  stepValue=10;
+  apValue=0;
+}
   display.clearDisplay();
   display.setCursor(0, 10);
   display.print("F:");
@@ -161,7 +172,7 @@ void setup() {
 
 void loop() {
   int sw_count;
-  int enc_diff, last_offset;
+  int enc_diff;
   short counter_now;
   digitalWrite(SS, HIGH);
   sw_count = 0;
@@ -194,9 +205,9 @@ void loop() {
     SetLED(HIGH, LOW);
   }
 
-  if (sw_count > 50 || (rec_mode && (sw_count !=0)) ) {    // Toggle step counts setting mode 
+  if (sw_count > 50 || (rec_mode && (sw_count != 0)) ) {   // Toggle step counts setting mode
     rec_mode = ! rec_mode;
-    if(!rec_mode) mode=0;
+    if (!rec_mode) mode = 0;
   }
   if (rec_mode) {
     SetLED(HIGH, HIGH);
@@ -212,15 +223,15 @@ void loop() {
       enc_diff > 0 ? 1 : -1;
       switch (mode) {
         case 0:
-          stepValue = enc_diff * stepValue;  // Focus current position
-          disp_update( stepValue , focuserPosition);
+          offset = enc_diff * stepValue;  // Focus current position
+          disp_update( offset , focuserPosition);
           break;
         case 1:
           apValue += enc_diff;
           disp_update( apValue , focuserPosition);
           break;
       }
-      proc_lens(enc_diff);
+      proc_lens();
     }
   }
 }
@@ -230,6 +241,9 @@ void SetLED(int red, int green) {
   digitalWrite(LED_Green, green);
 }
 
+/*
+ *   Status display on OLED
+ */
 void disp_update(int tmp, int focuserPosition) {
   char sep;
   display.clearDisplay();
@@ -248,7 +262,7 @@ void disp_update(int tmp, int focuserPosition) {
       case 0:
         display.print("S");
         display.print(sep);
-        display.println( stepValue );
+        display.println( offset );
         display.print("F");
         display.print(sep);
         display.println( focuserPosition);
@@ -265,39 +279,41 @@ void disp_update(int tmp, int focuserPosition) {
   }
   display.display();
 }
-
-void proc_lens(int tmp) {
+/*
+ * 1:Send control commands to LENS
+ * 2:Update EEPROM data
+ * 
+ * mode 0:focus control mode
+ *  param1 focuserPosition... focus value
+ *  param2 offset         ... focus move value
+ * mode 1:aperture control mode
+ *  param apValue         ... aperture value
+ */
+void proc_lens() {
   int ap, x, y;
-  digitalWrite(SS, LOW);
-  if  (mode == 0 ) { // Send command to LENS　フォーカス
-    offset = stepValue * tmp ;
+  digitalWrite(SS, LOW); 
+  if  (mode == 0 ) { // Focus control
+    //offset = stepValue ;
     x = highByte(focuserPosition);
     y = lowByte(focuserPosition);
     EEPROM.write(fpAddr, x);      // write to EEPROM last focus position
     EEPROM.write(fpAddr + 1, y);
     x = highByte(offset);
     y = lowByte(offset);
-#ifdef DEBUG
-    Serial.print("FP:");
-    Serial.print(offset);
-    Serial.print(", ");
-    Serial.println(focuserPosition);
-#endif
     InitLens();
     SPI.transfer(0x44);       delay(30);
     SPI.transfer(x);        delay(30);
     SPI.transfer(y);        delay(30);
     SPI.transfer(0);        delay(100);
     focuserPosition += offset;
-  } else {              // 絞り
-//    apValue = mode_counter[mode] ;
-    ap = (apValue - EEPROM.read(apAddr)) * 3;
 #ifdef DEBUG
-    Serial.print("APvalue:");
-    Serial.print(apValue);
-    Serial.print(",SET ap:");
-    Serial.println(ap);
+    Serial.print("FP:");
+    Serial.print(offset);
+    Serial.print(", ");
+    Serial.println(focuserPosition);
 #endif
+  } else {              // aperture control
+    ap = (apValue - EEPROM.read(apAddr)) * 3;
     if (apValue != EEPROM.read(apAddr))
     {
       InitLens();
@@ -310,4 +326,10 @@ void proc_lens(int tmp) {
       EEPROM.write(apAddr, apValue);
     }
   }
+#ifdef DEBUG
+  Serial.print("APvalue:");
+  Serial.print(apValue);
+  Serial.print(",SET ap:");
+  Serial.println(ap);
+#endif
 }
