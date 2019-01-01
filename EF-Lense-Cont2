@@ -1,0 +1,313 @@
+/*
+   ロータリーエンコーダの参照コード
+   https://jumbleat.com/2016/12/17/encoder_1/
+*/
+/*
+   EFレンズの制御関連参考リンク
+   ASCOM EF Lens Controller
+   http://www.indilib.org/media/kunena/attachments/3728/ascom_efEN.pdf
+   EFレンズから信号線の引き出の参照資料
+   How to Move Canon EF Lenses Yosuke Bando
+   http://web.media.mit.edu/~bandy/invariant/move_lens.pdf
+   Canon　EFレンズのArduino制御
+   http://otobs.org/hiki/?EOS_model
+   Technical aspects of the Canon EF lens mount
+   http://www.eflens.com/lens_articles/ef_lens_mount.html
+*/
+#define DEBUG
+#include <SPI.h>
+#include <EEPROM.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+#define LED_SW   7
+#define SS 10   // SPI SS for ATmega168/328
+#define F1 9    // Function SW
+#define ENC_A  2
+#define ENC_B  3
+#define LED_Red 14
+#define LED_Green 15
+
+volatile byte pos;
+volatile int  enc_count;
+boolean    sw = false;
+boolean  rec_mode = false; // move LENS without pushing SW
+
+int mode = 0;   // 0:Focus control, 1:Aperture control
+int mode_counter[2];
+int focuserPosition,  apValue, offset, apAddr, fpAddr, fpValue, stepAddr, stepValue;
+
+void InitLens()
+{
+  SPI.transfer(0x0A);
+  delay(30);
+  SPI.transfer(0x00);
+  delay(30);
+  SPI.transfer(0x0A);
+  delay(30);
+  SPI.transfer(0x00);
+  delay(30);
+}
+
+int ENC_COUNT(int incoming) {
+  static int enc_old = enc_count;
+  int val_change = enc_count - enc_old;
+
+  if (val_change != 0)
+  {
+    incoming += val_change;
+    enc_old   = enc_count;
+  }
+  return incoming;
+}
+
+void ENC_READ() {
+  byte cur = (!digitalRead(ENC_B) << 1) + !digitalRead(ENC_A);
+  byte old = pos & B00000011;
+  byte dir = (pos & B00110000) >> 4;
+
+  if (cur == 3) cur = 2;
+  else if (cur == 2) cur = 3;
+
+  if (cur != old)
+  {
+    if (dir == 0)
+    {
+      if (cur == 1 || cur == 3) dir = cur;
+    } else {
+      if (cur == 0)
+      {
+        if (dir == 1 && old == 3) enc_count++;
+        else if (dir == 3 && old == 1) enc_count--;
+        dir = 0;
+      }
+    }
+    pos = (dir << 4) + (old << 2) + cur;
+  }
+}
+
+void setup() {
+  digitalWrite(13, LOW); // SPI Clock PIN
+  pinMode(ENC_A, INPUT_PULLUP);
+  pinMode(ENC_B, INPUT_PULLUP);
+  pinMode(LED_Red, OUTPUT);
+  pinMode(LED_Green, OUTPUT);
+  pinMode(LED_SW, INPUT_PULLUP);
+  pinMode(SS, OUTPUT);
+  pinMode(F1, INPUT_PULLUP);
+
+  attachInterrupt(0, ENC_READ, CHANGE);
+  attachInterrupt(1, ENC_READ, CHANGE);
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+
+  // Font size
+  display.setTextSize(3);
+  // Font color
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  display.println("EF-LensFocuser");
+  display.display();
+  delay(1000);
+  mode = 0;   // focus control mode
+  apAddr = 0; // 1 byte memory for apurture value
+  fpAddr = 1; // 2 byte memory for focus position
+  stepAddr = 3; // 1 bye memory for focusing steps
+  focuserPosition = 5000;
+  SPI.begin();
+  SPI.setBitOrder(MSBFIRST);
+  SPI.setClockDivider(SPI_CLOCK_DIV128);
+  SPI.setDataMode(SPI_MODE3);
+  digitalWrite(12, HIGH);
+  digitalWrite(LED_Red, HIGH);
+  digitalWrite(LED_Green, LOW);
+  InitLens();
+  SPI.transfer(0x05); // Focus Max
+  delay(1000);
+  apValue = EEPROM.read(apAddr);
+  fpValue =  EEPROM.read(fpAddr) * 256 + EEPROM.read(fpAddr + 1); // focus position
+  stepValue =  EEPROM.read(stepAddr);
+
+  offset = fpValue - focuserPosition;
+  proc_lens(offset);    // Move focus tot last position
+  focuserPosition = fpValue;
+#ifdef DEBUG
+  Serial.begin(9600);
+  Serial.print("FP:");
+  Serial.println(fpValue);
+  Serial.print("OffSet:");
+  Serial.println(offset);
+  Serial.print("Step:");
+  Serial.println(stepValue);
+  Serial.print("AP:");
+  Serial.println(apValue);
+#endif
+  display.clearDisplay();
+  display.setCursor(0, 10);
+  display.print("F:");
+  display.println(fpValue);
+  display.print("A:");
+  display.println(apValue);
+  display.display();
+  delay(1000);
+}
+
+void loop() {
+  int sw_count;
+  int enc_diff, last_offset;
+  short counter_now;
+  digitalWrite(SS, HIGH);
+  sw_count = 0;
+  /* encorder counts */
+  counter_now = ENC_COUNT(mode_counter[mode]);
+  enc_diff = counter_now - mode_counter[mode];   // encoder counter state
+  /* SW pressed ? */
+  while (digitalRead(LED_SW) == LOW) {
+    sw_count++;
+    if  (!rec_mode) {
+      if (mode == 1) {    // forcus control mode RED
+        SetLED(HIGH, LOW);
+      } else {            // aperture control mode GREEN
+        SetLED(LOW, HIGH);
+      }
+    }
+    if (sw_count > 50) {  // Change Step Size mode
+      SetLED(HIGH, HIGH);
+    }
+    delay(10);
+  }
+  delay(100);
+  if (sw_count > 0 && sw_count < 50) {  // Toggle Focus/Aperture
+    mode == 0 ? mode = 1 : mode = 0;
+    disp_update(stepValue, focuserPosition);
+  }
+  if (mode == 1) {
+    SetLED(LOW, HIGH);
+  } else {
+    SetLED(HIGH, LOW);
+  }
+
+  if (sw_count > 50 || (rec_mode && (sw_count !=0)) ) {    // Toggle step counts setting mode 
+    rec_mode = ! rec_mode;
+    if(!rec_mode) mode=0;
+  }
+  if (rec_mode) {
+    SetLED(HIGH, HIGH);
+    mode = 0;
+    if (sw_count != 0 || enc_diff != 0) {
+      stepValue += enc_diff;
+      if (stepValue < 1) stepValue = 1; // minimum step size should be 1
+      EEPROM.write(stepAddr, stepValue);
+    }
+    disp_update(stepValue, focuserPosition);
+  } else {
+    if (mode_counter[mode] != counter_now)  {
+      enc_diff > 0 ? 1 : -1;
+      switch (mode) {
+        case 0:
+          stepValue = enc_diff * stepValue;  // Focus current position
+          disp_update( stepValue , focuserPosition);
+          break;
+        case 1:
+          apValue += enc_diff;
+          disp_update( apValue , focuserPosition);
+          break;
+      }
+      proc_lens(enc_diff);
+    }
+  }
+}
+
+void SetLED(int red, int green) {
+  digitalWrite(LED_Red, red);
+  digitalWrite(LED_Green, green);
+}
+
+void disp_update(int tmp, int focuserPosition) {
+  char sep;
+  display.clearDisplay();
+  display.setCursor(0, 10);
+  sep = ':';
+  if (rec_mode) {    // Update when encoder rotated
+    display.print("S");
+    display.print(sep);
+    display.println(tmp );
+    display.print("F");
+    display.print(sep);
+    display.println( focuserPosition);
+  } else {        // Update when switch pushed
+    sep = ':';
+    switch (mode) {
+      case 0:
+        display.print("S");
+        display.print(sep);
+        display.println( stepValue );
+        display.print("F");
+        display.print(sep);
+        display.println( focuserPosition);
+        break;
+      case 1:
+        display.print("A");
+        display.print(sep);
+        display.println(apValue);
+        display.print("F");
+        display.print(sep);
+        display.println( focuserPosition );
+        break;
+    }
+  }
+  display.display();
+}
+
+void proc_lens(int tmp) {
+  int ap, x, y;
+  digitalWrite(SS, LOW);
+  if  (mode == 0 ) { // Send command to LENS　フォーカス
+    offset = stepValue * tmp ;
+    x = highByte(focuserPosition);
+    y = lowByte(focuserPosition);
+    EEPROM.write(fpAddr, x);      // write to EEPROM last focus position
+    EEPROM.write(fpAddr + 1, y);
+    x = highByte(offset);
+    y = lowByte(offset);
+#ifdef DEBUG
+    Serial.print("FP:");
+    Serial.print(offset);
+    Serial.print(", ");
+    Serial.println(focuserPosition);
+#endif
+    InitLens();
+    SPI.transfer(0x44);       delay(30);
+    SPI.transfer(x);        delay(30);
+    SPI.transfer(y);        delay(30);
+    SPI.transfer(0);        delay(100);
+    focuserPosition += offset;
+  } else {              // 絞り
+//    apValue = mode_counter[mode] ;
+    ap = (apValue - EEPROM.read(apAddr)) * 3;
+#ifdef DEBUG
+    Serial.print("APvalue:");
+    Serial.print(apValue);
+    Serial.print(",SET ap:");
+    Serial.println(ap);
+#endif
+    if (apValue != EEPROM.read(apAddr))
+    {
+      InitLens();
+      SPI.transfer(0x07);          delay(10);
+      SPI.transfer(0x13);          delay(10);
+      SPI.transfer((apValue - EEPROM.read(apAddr)) * 3);
+      delay(100);
+      SPI.transfer(0x08);          delay(10);
+      SPI.transfer(0x00);          delay(10);
+      EEPROM.write(apAddr, apValue);
+    }
+  }
+}
